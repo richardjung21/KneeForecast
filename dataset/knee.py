@@ -16,19 +16,24 @@ class KneeXRDataset(Dataset):
     # labels.pkl: {subject_id: {time_point: label}}
     # changes.pkl: {subject_id: {time_point: change}}
     # bmi.pkl: {subject_id: {time_point: bmi}}
+    # metadata.pkl: {subject_id: {time_point: {metadata_key: metadata_value}}}
+    # patient_sites.pkl: {subject_id: site}
     ############################################################
     
     def __init__(self, 
                  pickle_dir:str = "/mnt/sdg2/seungho/Dataset/Forecasting/list_dict.pkl", 
                  target_dim:tuple = (512,512), 
                  split:str = 'train',
-                 binary:bool = False):
+                 binary:bool = False,
+                 split_by_site:bool = True):
         super().__init__()
 
         self.target_dim = target_dim
         label_dir = pickle_dir.replace(pickle_dir.split("/")[-1], "labels.pkl")
         changes_dir = pickle_dir.replace(pickle_dir.split("/")[-1], "changes.pkl")
         bmi_dir = pickle_dir.replace(pickle_dir.split("/")[-1], "bmi.pkl")
+        metadata_dir = pickle_dir.replace(pickle_dir.split("/")[-1], "metadata.pkl")
+        patient_sites = pickle_dir.replace(pickle_dir.split("/")[-1], "patient_sites.pkl")
 
         with open(pickle_dir, "rb") as f:
             self.all_image_folders = pickle.load(f)
@@ -42,16 +47,34 @@ class KneeXRDataset(Dataset):
             
         with open(bmi_dir, "rb") as f:
             self.bmi = pickle.load(f)
+            
+        with open(metadata_dir, "rb") as f:
+            self.metadata = pickle.load(f)
 
-        train_end, val_end = int(len(self.all_image_folders) * 0.6), int(len(self.all_image_folders) * 0.8)
-        if split == 'train':
-            self.all_image_folders = dict(list(self.all_image_folders.items())[:train_end])
-        elif split == 'val':
-            self.all_image_folders = dict(list(self.all_image_folders.items())[train_end:val_end])
-        elif split == 'test':
-            self.all_image_folders = dict(list(self.all_image_folders.items())[val_end:])
+        if split_by_site: # Split by site for robustness test
+            sites = ["A", "B", "C", "E"]
+            with open(patient_sites, "rb") as f:
+                self.patient_sites = pickle.load(f)
+            if split == 'train':
+                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k] in sites}
+            elif split == 'val' or split == 'test':
+                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k] not in sites}
+                length = len(self.all_image_folders)
+                val_end = int(length * 0.5)
+                if split == 'val':
+                    self.all_image_folders = dict(list(self.all_image_folders.items())[:val_end])
+                elif split == 'test':
+                    self.all_image_folders = dict(list(self.all_image_folders.items())[val_end:])
+                    
+        else: # Split train,val,test randomly
+            train_end, val_end = int(len(self.all_image_folders) * 0.6), int(len(self.all_image_folders) * 0.8)
+            if split == 'train':
+                self.all_image_folders = dict(list(self.all_image_folders.items())[:train_end])
+            elif split == 'val':
+                self.all_image_folders = dict(list(self.all_image_folders.items())[train_end:val_end])
+            elif split == 'test':
+                self.all_image_folders = dict(list(self.all_image_folders.items())[val_end:])
 
-        self.max_T = 4
         self.binary = binary
 
     @staticmethod
@@ -110,10 +133,12 @@ class KneeXRDataset(Dataset):
 
         img0 = self.to_torch(self.load_img(img_dir0))
         img1 = self.to_torch(self.load_img(img_dir1))
-        t0 = self.to_torch(np.array(t0))
-        t1 = self.to_torch(np.array(t1))
-        kl_0 = self.to_torch(np.array(kl_0))
-        kl_1 = self.to_torch(np.array(kl_1))
-        change = self.to_torch(np.array(change))
-        bmi = self.to_torch(bmi)
-        return img0, img1, t0, t1, kl_0, kl_1, change, bmi
+        meta = {
+            "time_0": self.to_torch(np.array(t0)),
+            "time_1": self.to_torch(np.array(t1)),
+            "kl_0": self.to_torch(np.array(kl_0)),
+            "kl_1": self.to_torch(np.array(kl_1)),
+            "change": self.to_torch(np.array(change)),
+            "bmi": self.to_torch(bmi),
+        }
+        return img0, img1, meta
