@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 import torch
 
 import numpy as np
@@ -56,9 +57,9 @@ class KneeXRDataset(Dataset):
             with open(patient_sites, "rb") as f:
                 self.patient_sites = pickle.load(f)
             if split == 'train':
-                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k] in sites}
+                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k.replace("L","R").replace("R","")] in sites}
             elif split == 'val' or split == 'test':
-                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k] not in sites}
+                self.all_image_folders = {k: v for k, v in self.all_image_folders.items() if self.patient_sites[k.replace("L","R").replace("R","")] not in sites}
                 length = len(self.all_image_folders)
                 val_end = int(length * 0.5)
                 if split == 'val':
@@ -141,4 +142,13 @@ class KneeXRDataset(Dataset):
             "change": self.to_torch(np.array(change)),
             "bmi": self.to_torch(bmi),
         }
+
+        for key, value in self.metadata[id][f"{t0*12:02d}"].items():
+            meta[key] = self.to_torch(np.array(value))
+
         return img0, img1, meta
+
+if __name__ == "__main__":
+    dataset = KneeXRDataset(pickle_dir="/mnt/sdg2/seungho/Dataset/Forecasting/list_dict_reduced.pkl", split="train", binary=True, split_by_site=True)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+    print(next(iter(dataloader)))
