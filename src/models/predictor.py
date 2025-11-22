@@ -20,7 +20,9 @@ class Classifier(nn.Module):
 
     def calculate_loss(self, x, targets):
         x = self.forward(x)
-        return F.nll_loss(F.log_softmax(x, dim=1), targets.long())
+        # print("X:", x)
+        # print("Targets", targets)
+        return F.cross_entropy(x, targets.long())
 
     def forward(self, x):
         x = x.view(x.size(0), -1)
@@ -145,13 +147,11 @@ class Predictor(nn.Module):
         preds = self.regressions(latent)
         if preds.shape[1] == 1:
             preds = preds.squeeze(1)
-        all_reg_preds.append(preds)
-        all_reg_targets.append(regressors)
 
         concept_loss = concept_loss/(len(self.classifiers) + 1)
         
         y = self.decode(latent)
-        return concept_loss, y, all_class_preds, all_class_targets, all_reg_preds, all_reg_targets
+        return concept_loss, y, all_class_preds, all_class_targets, preds, regressors
 
     def forward(self, x):
         x = self.encode(x)

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import argparse
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import numpy as np
-from sklearn.metrics import roc_auc_score, mean_absolute_error
+from sklearn.metrics import f1_score, mean_absolute_error, accuracy_score
 
 concept_classes = {
     "XRATTL": 4,
@@ -19,6 +19,8 @@ concept_classes = {
     "XRCYFM": 3,
     "XRCYTL": 3,
     "XRCYTM": 3,
+    "XRJSL": 4,
+    "XRJSM": 4,
     "XROSFL": 4,
     "XROSFM": 4,
     "XROSTL": 4,
@@ -30,7 +32,7 @@ concept_classes = {
 
 regression_classes = ["MCMJSW", "TPCFDS"]
 
-ignore_list = ['bmi', 'change', "time_0", "time_1", "kl_1"]
+ignore_list = ['bmi', 'change', "time_0", "time_1", "kl_1", "XRATTL", "XRATTM", "XRCYFL", "XRCYFM", "XRCYTL", "XRCYTM"]
 
 def regularize_img(x):
     return (x-x.min())/(x.max()-x.min())*2-1
@@ -58,22 +60,23 @@ def load_data(args):
     return train_dataloader, val_dataloader, test_dataloader
 
 
-def val_concepts(val_dataloader, model, args, device, best_val_loss):
+def val_concepts(val_dataloader, model, args, device, best_val_loss, epoch):
     model.eval()
-    lpips = LearnedPerceptualImagePatchSimilarity('vgg').to(device)
-    
     total_concept_loss = 0
-    total_lpips_loss = 0
-    total_loss_sum = 0
+    save_dir = f"./results/{args.save_dir}"
+    images_dir = os.path.join(save_dir, "images", f"epoch_{epoch}")
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(images_dir, exist_ok=True)
     
-    all_class_preds = []
-    all_class_targets = []
-    all_reg_preds = []
-    all_reg_targets = []
+    tp = [0, 0, 0, 0, 0, 0, 0]
+    fp = [0, 0, 0, 0, 0, 0, 0]
+    fn = [0, 0, 0, 0, 0, 0, 0]
+    tn = [0, 0, 0, 0, 0, 0, 0]
+    regression_error = [0, 0]
     
     with torch.no_grad():
         pbar = tqdm(val_dataloader, desc="Validation")
-        for img0, img1, metadata in pbar:
+        for i, (img0, img1, metadata) in enumerate(pbar):
             img0 = img0.to(device)
             img1 = img1.to(device)
 
@@ -93,66 +96,56 @@ def val_concepts(val_dataloader, model, args, device, best_val_loss):
             classification = torch.stack(classification, dim=1).to(device)
             regression = torch.stack(regression, dim=1).to(device)
 
-            concept_loss, y, batch_class_preds, batch_class_targets, batch_reg_preds, batch_reg_targets = model.validate_concepts(img0, classification, regression)
+            concept_loss, reconstruction, batch_class_preds, batch_class_targets, reg_preds, reg_targets = model.validate_concepts(img0, classification, regression)
+
+            reconstruction = torch.clamp((reconstruction[0]+1)/2, 0, 1)
+            img0 = torch.clamp((img0[0]+1)/2, 0, 1)
             
-            y = clip_img(y)
-
-            lpips_loss = lpips(img0, y)
-
-            total_loss = 5*concept_loss + lpips_loss
+            if i % (len(pbar)//10) == 0:
+                gt_image_path = os.path.join(images_dir, f"Iteration_{i}_gt.png")
+                recon_image_path = os.path.join(images_dir, f"Iteration_{i}_recon.png")
+                plt.imsave(gt_image_path, img0.permute(1, 2, 0).cpu().numpy())
+                plt.imsave(recon_image_path, reconstruction.permute(1, 2, 0).cpu().numpy())
             
             total_concept_loss += concept_loss.item()
-            total_lpips_loss += lpips_loss.item()
-            total_loss_sum += total_loss.item()
-            
-            # Append batch results to lists
-            # batch_class_preds is a list of tensors (one per classifier)
-            if not all_class_preds:
-                all_class_preds = [[] for _ in range(len(batch_class_preds))]
-                all_class_targets = [[] for _ in range(len(batch_class_targets))]
-                all_reg_preds = [[] for _ in range(len(batch_reg_preds))]
-                all_reg_targets = [[] for _ in range(len(batch_reg_targets))]
-            
-            for i in range(len(batch_class_preds)):
-                all_class_preds[i].append(batch_class_preds[i].cpu())
-                all_class_targets[i].append(batch_class_targets[i].cpu())
-                
-            for i in range(len(batch_reg_preds)):
-                all_reg_preds[i].append(batch_reg_preds[i].cpu())
-                all_reg_targets[i].append(batch_reg_targets[i].cpu())
+
+            predicted_classes = []
+            for class_preds in batch_class_preds:
+                predicted_classes.append(torch.argmax(class_preds, dim=1))
+
+            predicted_classes = torch.stack(predicted_classes, dim=1)
+            class_targets = torch.stack(batch_class_targets, dim=1).long()
+
+            for i in range(predicted_classes.shape[1]):
+                tp[i] += torch.sum(predicted_classes[:, i] == class_targets[:, i]).item()
+                fp[i] += torch.sum(predicted_classes[:, i] != class_targets[:, i]).item()
+                fn[i] += torch.sum(predicted_classes[:, i] != class_targets[:, i]).item()
+                tn[i] += torch.sum(predicted_classes[:, i] == class_targets[:, i]).item()
+
+            regression_error[0] += torch.sum(torch.abs(reg_preds[:, 0] - reg_targets[:, 0])).item()
+            regression_error[1] += torch.sum(torch.abs(reg_preds[:, 1] - reg_targets[:, 1])).item()
             
     avg_concept_loss = total_concept_loss / len(val_dataloader)
-    avg_lpips_loss = total_lpips_loss / len(val_dataloader)
-    avg_total_loss = total_loss_sum / len(val_dataloader)
+    regression_error = [regression_error[0]/len(val_dataloader), regression_error[1]/len(val_dataloader)]
+    specificity = [0, 0, 0, 0, 0, 0, 0]
+    sensitivity = [0, 0, 0, 0, 0, 0, 0]
+    f1 = [0, 0, 0, 0, 0, 0, 0]
+    acc = [0, 0, 0, 0, 0, 0, 0]
     
-    # Calculate AUROC and MAE over the entire validation set
-    final_auroc = []
-    final_mae = []
+    for i in range(len(tp)):
+        specificity[i] = tn[i] / (tn[i] + fp[i])
+        sensitivity[i] = tp[i] / (tp[i] + fn[i])
+        f1[i] = 2 * (specificity[i] * sensitivity[i]) / (specificity[i] + sensitivity[i])
+        acc[i] = (tp[i] + tn[i]) / (tp[i] + tn[i] + fp[i] + fn[i])
     
-    # Process Classifiers
-    for i in range(len(all_class_preds)):
-        preds = torch.cat(all_class_preds[i], dim=0).numpy()
-        targets = torch.cat(all_class_targets[i], dim=0).numpy()
-        
-        try:
-            if preds.shape[1] == 2:
-                score = roc_auc_score(targets, preds[:, 1])
-            else:
-                score = roc_auc_score(targets, preds, multi_class='ovr')
-        except ValueError:
-            score = float('nan')
-        final_auroc.append(score)
-        
-    # Process Regressors
-    for i in range(len(all_reg_preds)):
-        preds = torch.cat(all_reg_preds[i], dim=0).numpy()
-        targets = torch.cat(all_reg_targets[i], dim=0).numpy()
-        mae = mean_absolute_error(targets, preds)
-        final_mae.append(mae)
-    
-    print(f"Validation Results - Concept Loss: {avg_concept_loss:.4f}, LPIPS Loss: {avg_lpips_loss:.4f}, Total Loss: {avg_total_loss:.4f}")
-    print(f"Average AUROC per task: {final_auroc}")
-    print(f"Average MAE per task: {final_mae}")
+    f1_string = [f"{i:.4f}" for i in f1]
+    acc_string = [f"{i:.4f}" for i in acc]
+    regression_error_string = [f"{i:.4f}" for i in regression_error]
+
+    print(f"Validation Results - Concept Loss: {avg_concept_loss:.4f}")
+    print(f"Average F1 per task: {f1_string}")
+    print(f"Average Accuracy per task: {acc_string}")
+    print(f"Average MAE per task: {regression_error_string}")
     
     save_dir = f"./results/{args.save_dir}"
     os.makedirs(save_dir, exist_ok=True)
@@ -160,8 +153,8 @@ def val_concepts(val_dataloader, model, args, device, best_val_loss):
     # Save latest model
     torch.save(model.state_dict(), os.path.join(save_dir, "latest_model.pth"))
     
-    if avg_total_loss < best_val_loss:
-        best_val_loss = avg_total_loss
+    if avg_concept_loss < best_val_loss:
+        best_val_loss = avg_concept_loss
         torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pth"))
         print(f"New best model saved with loss: {best_val_loss:.4f}")
     
@@ -173,8 +166,6 @@ def train_concepts(train_dataloader, val_dataloader, model, args, device):
     model.train()
     lpips = LearnedPerceptualImagePatchSimilarity('vgg').to(device)
     optimizer = Adam(model.parameters(), lr=args.lr)
-    save_dir = f"./results/{args.save_dir}"
-    os.makedirs(save_dir, exist_ok=True)
     
     best_val_loss = float('inf')
 
@@ -224,15 +215,21 @@ def train_concepts(train_dataloader, val_dataloader, model, args, device):
 
         
         # Validation at the end of epoch
-        best_val_loss = val_concepts(val_dataloader, model, args, device, best_val_loss)
+        best_val_loss = val_concepts(val_dataloader, model, args, device, best_val_loss, epoch)
     
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_dataloader, val_dataloader, test_dataloader = load_data(args)
     model = init_model(args)
+    if args.checkpoint:
+        model.load_state_dict(torch.load(args.checkpoint))
     model.to(device)
 
-    train_concepts(train_dataloader, val_dataloader, model, args, device)
+    best_val_loss = float('inf')
+    if args.mode == "train":
+        train_concepts(train_dataloader, val_dataloader, model, args, device)
+    elif args.mode == "val":
+        best_val_loss = val_concepts(val_dataloader, model, args, device, best_val_loss, 0)
     
     
 
@@ -247,6 +244,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--save_dir", type=str, default="concept")
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "val"])
+    parser.add_argument("--checkpoint", type=str, default="")
     args = parser.parse_args()
     
     main(args)
